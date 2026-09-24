@@ -1,0 +1,14 @@
+*.db
+*.db-shm
+*.db-wal
+tanamori.exe
+/dist/
+/logs/
+/cache/
+/data/ai/
+/data/e2e/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*

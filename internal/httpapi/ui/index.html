@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>TANAMORI</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#top" aria-label="TANAMORI ホーム">
+        <span class="brand-mark">棚</span>
+        <span><strong>TANAMORI</strong><small>ローカル文書整理</small></span>
+      </a>
+      <nav aria-label="メインメニュー">
+        <a class="nav-link active" href="#dashboard">概要</a>
+        <a class="nav-link" href="#intake">取り込み</a>
+        <a class="nav-link" href="#classifications">分類結果</a>
+        <a class="nav-link" href="#search">検索</a>
+        <a class="nav-link" href="#folders">分類先</a>
+        <a class="nav-link" href="#proposals">移動提案</a>
+        <a class="nav-link" href="#settings">設定・データ管理</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="pulse" aria-hidden="true"></span>
+        <span>このPC内だけで動作</span>
+      </div>
+    </aside>
+
+    <main id="top">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">DOCUMENT ORGANIZER</p>
+          <h1>文書の居場所を、ひと目で。</h1>
+        </div>
+        <div class="status-cluster">
+          <span id="serverStatus" class="status ok">サーバー稼働中</span>
+          <button id="refreshAll" class="icon-button" type="button" title="すべて更新" aria-label="すべて更新">↻</button>
+        </div>
+      </header>
+
+      <section id="dashboard" class="section">
+        <div class="hero">
+          <div>
+            <p class="eyebrow light">LOCAL FIRST / HUMAN CONTROL</p>
+            <h2>読む、比べる、提案する。<br>移動はあなたが決める。</h2>
+            <p>ファイルはPCの外へ送信しません。大量投入時もキューで少しずつ処理し、サーバーの応答性を保ちます。</p>
+          </div>
+          <div class="hero-model">
+            <span>分類モデル</span>
+            <strong id="modelName">確認中…</strong>
+            <small id="modelState">状態を読み込んでいます</small>
+          </div>
+        </div>
+
+        <div class="metrics" aria-label="処理状況">
+          <article><span>待機中</span><strong id="countQueued">—</strong><small>QUEUE</small></article>
+          <article><span>処理中</span><strong id="countRunning">—</strong><small>RUNNING</small></article>
+          <article><span>完了</span><strong id="countSucceeded">—</strong><small>DONE</small></article>
+          <article><span>失敗</span><strong id="countFailed">—</strong><small>FAILED</small></article>
+        </div>
+      </section>
+
+      <section id="intake" class="section grid-two">
+        <article class="panel accent-panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">QUICK TEST</p><h2>分類テストを一括開始</h2></div>
+            <span class="step">01</span>
+          </div>
+          <p class="muted">親フォルダー直下の各サブフォルダーを分類先として登録し、その中のファイルをキューへ投入します。`01_会計` のような番号は分類名から自動で除きます。</p>
+          <form id="discoverForm">
+            <label>テストデータの親フォルダー
+              <input id="discoverPath" name="path" type="text" autocomplete="off" placeholder="D:\Ollama\projects\tanamori\TANAMORI_分類テスト" required>
+            </label>
+            <button class="primary" type="submit">分類先を登録してテスト開始</button>
+          </form>
+          <p id="discoverMessage" class="form-message" role="status"></p>
+        </article>
+
+        <article class="panel">
+          <div class="panel-heading">
+            <div><p class="eyebrow">ADD TO QUEUE</p><h2>ファイル・フォルダーを取り込む</h2></div>
+            <span class="step quiet">02</span>
+          </div>
+          <p class="muted">ファイル・フォルダーを下へドロップするか、選択してください。ブラウザーからの選択ではローカル保管領域にコピーしてから順次キューへ登録します。元ファイルは変更しません。</p>
+          <div id="dropZone" class="drop-zone" tabindex="0" role="group" aria-label="ファイル・フォルダーをドロップ">
+            <strong>ここにファイル・フォルダーをドロップ</strong>
+            <div class="drop-actions">
+              <label class="secondary picker">ファイルを選択<input id="pickFiles" type="file" multiple hidden></label>
+              <label class="secondary picker">フォルダーを選択<input id="pickFolder" type="file" webkitdirectory directory multiple hidden></label>
+            </div>
+            <small>1ファイル128 MiBまで。大量のファイルも1件ずつ送信します。</small>
+          </div>
+          <p id="uploadMessage" class="form-message" role="status"></p>
+          <p class="muted">PC上の絶対パスが分かる場合は、コピーせずに直接キューへ登録できます。</p>
+          <form id="enqueueForm">
+            <label>取り込むパス
+              <input id="enqueuePath" name="path" type="text" autocomplete="off" placeholder="D:\Inbox または D:\Inbox\sample.txt" required>
+            </label>
+            <button class="secondary" type="submit">キューへ追加</button>
+          </form>
+          <p id="enqueueMessage" class="form-message" role="status"></p>
+        </article>
+      </section>
+
+      <section class="section">
+        <div class="section-title">
+          <div><p class="eyebrow">QUEUE ACTIVITY</p><h2>最近の処理</h2></div>
+          <button class="text-button" data-refresh="jobs" type="button">更新</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>状態</th><th>対象</th><th>種類</th><th>試行</th><th>詳細</th></tr></thead>
+            <tbody id="jobsBody"><tr><td colspan="5" class="empty">読み込み中…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="classifications" class="section">
+        <div class="section-title">
+          <div><p class="eyebrow">CLASSIFICATION</p><h2>分類結果</h2><p class="muted">「一致」は、AIの第1候補と現在の分類先が同じことを示します。</p></div>
+          <button class="text-button" data-refresh="classifications" type="button">更新</button>
+        </div>
+        <div id="classificationSummary" class="result-summary"></div>
+        <div id="classificationList" class="result-list"><div class="empty-card">まだ分類結果がありません。</div></div>
+      </section>
+
+      <section id="search" class="section panel search-panel">
+        <div class="section-title compact">
+          <div><p class="eyebrow">FULL-TEXT SEARCH</p><h2>取り込んだ文書を検索</h2></div>
+        </div>
+        <form id="searchForm" class="search-form">
+          <input id="searchQuery" type="search" placeholder="例：予約フォーム、請求書、公開予定" required>
+          <button class="primary" type="submit">検索</button>
+        </form>
+        <div id="searchResults" class="search-results"></div>
+      </section>
+
+      <section id="folders" class="section grid-two folders-grid">
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">DESTINATION</p><h2>分類先を1件登録</h2></div></div>
+          <form id="folderForm">
+            <label>フォルダーのパス<input id="folderPath" type="text" placeholder="D:\Library\Contracts" required></label>
+            <div class="field-row">
+              <label>表示名<input id="folderName" type="text" placeholder="契約書"></label>
+              <label>用途<input id="folderPurpose" type="text" placeholder="契約書と合意文書"></label>
+            </div>
+            <label>補足<input id="folderDescription" type="text" placeholder="任意"></label>
+            <button class="secondary" type="submit">分類先を登録</button>
+          </form>
+          <p id="folderMessage" class="form-message" role="status"></p>
+        </article>
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">MANAGED FOLDERS</p><h2>登録済み分類先</h2></div><button class="text-button" data-refresh="folders" type="button">更新</button></div>
+          <div id="folderList" class="folder-list"><div class="empty-card">読み込み中…</div></div>
+        </article>
+      </section>
+
+      <section id="proposals" class="section">
+        <div class="section-title">
+          <div><p class="eyebrow">MOVE PROPOSALS</p><h2>移動提案</h2><p class="muted">承認するまでファイルは移動しません。</p></div>
+          <button class="text-button" data-refresh="proposals" type="button">更新</button>
+        </div>
+        <div id="proposalList" class="proposal-list"><div class="empty-card">保留中の提案はありません。</div></div>
+      </section>
+
+      <section id="settings" class="section grid-two">
+        <article class="panel">
+          <div class="panel-heading"><div><p class="eyebrow">CLASSIFICATION RULES</p><h2>分類の優先度・命名</h2></div></div>
+          <p class="muted">文書には関連タグを別に記録します。複数のタグが該当した場合、数値が高い分類先を優先します。同点ならモデルの関連度を使います。</p>
+          <form id="settingsForm">
+            <div class="priority-grid">
+              <label>会計<input id="priorityAccounting" type="number" min="0" max="1000" required></label>
+              <label>会議<input id="priorityMeeting" type="number" min="0" max="1000" required></label>
+              <label>顧客名<input id="priorityCustomer" type="number" min="0" max="1000" required></label>
+              <label>ホームページ<input id="priorityWebsite" type="number" min="0" max="1000" required></label>
+              <label>修正依頼<input id="priorityRevision" type="number" min="0" max="1000" required></label>
+            </div>
+            <label>同名保存時の命名ルール<input id="renamePattern" type="text" placeholder="{name} ({n}){ext}" required></label>
+            <p class="muted">{name}=拡張子を除いた名前、{n}=連番、{ext}=拡張子。既定は「資料 (1).txt」です。</p>
+            <button class="secondary" type="submit">設定を保存</button>
+          </form>
+          <p id="settingsMessage" class="form-message" role="status"></p>
+        </article>
+        <article class="panel danger-panel">
+          <div class="panel-heading"><div><p class="eyebrow">TEST DATA RESET</p><h2>登録データを一括削除</h2></div></div>
+          <p class="muted">TANAMORIのDB内にある文書索引・処理履歴・分類先登録を削除します。PC上の元ファイル、取り込み時に作成したローカルコピー、AIモデルは削除しません。処理中のジョブがある間は実行できません。</p>
+          <form id="resetForm">
+            <label class="check-row"><input id="resetDocuments" type="checkbox" checked>文書データと処理履歴</label>
+            <label class="check-row"><input id="resetFolders" type="checkbox" checked>分類先の登録</label>
+            <label>確認のため「削除」と入力<input id="resetConfirm" type="text" autocomplete="off" required></label>
+            <button class="danger-button" type="submit">選択した登録データを削除</button>
+          </form>
+          <p id="resetMessage" class="form-message" role="status"></p>
+        </article>
+      </section>
+
+      <footer><span>TANAMORI <b id="appVersion"></b></span><span>127.0.0.1 — ローカル接続限定</span></footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
