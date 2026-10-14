@@ -1,0 +1,28 @@
+name: Go
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test-and-build:
+    env:
+      GOWORK: off
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Test TANAMORI
+        run: go test -count=1 ./...
+      - name: Test bundled filetext
+        working-directory: third_party/filetext
+        run: go test -count=1 ./...
+      - name: Vet TANAMORI
+        run: go vet ./...
+      - name: Build TANAMORI
+        run: go build ./cmd/tanamori

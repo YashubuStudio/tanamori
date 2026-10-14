@@ -19,9 +19,18 @@ const maxUploadBytes = 128 << 20
 
 var sessionName = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
+type uploadOriginStore interface {
+	RecordUploadOrigin(context.Context, string, string) error
+	DeleteUploadOrigin(context.Context, string) error
+}
+
 // A dropped browser file has no readable source path, so it is streamed to a
 // durable local incoming directory and only that copy is placed on the queue.
 func receiveUpload(ctx context.Context, w http.ResponseWriter, r *http.Request, store jobqueue.Store, queueLimit int64, root string) (jobqueue.Job, error) {
+	origins, ok := store.(uploadOriginStore)
+	if !ok {
+		return jobqueue.Job{}, fmt.Errorf("upload origin storage is unavailable")
+	}
 	if r.ContentLength > maxUploadBytes {
 		return jobqueue.Job{}, fmt.Errorf("upload exceeds 128 MiB")
 	}
@@ -83,8 +92,13 @@ func receiveUpload(ctx context.Context, w http.ResponseWriter, r *http.Request, 
 				return jobqueue.Job{}, fmt.Errorf("commit uploaded file: %w", err)
 			}
 		}
+		if err := origins.RecordUploadOrigin(ctx, target, relative); err != nil {
+			_ = os.Remove(target)
+			return jobqueue.Job{}, err
+		}
 		job, err := jobqueue.EnqueueLimited(ctx, store, target, queueLimit)
 		if err != nil {
+			_ = origins.DeleteUploadOrigin(ctx, target)
 			_ = os.Remove(target)
 			return jobqueue.Job{}, err
 		}

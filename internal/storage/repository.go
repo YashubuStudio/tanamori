@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ FROM folders ORDER BY current_path`)
 		return nil, fmt.Errorf("list folders: %w", err)
 	}
 	defer rows.Close()
-	var folders []domain.Folder
+	folders := make([]domain.Folder, 0)
 	for rows.Next() {
 		folder, err := scanFolder(rows)
 		if err != nil {
@@ -211,8 +212,10 @@ func (db *DB) ListProposals(ctx context.Context, state domain.ProposalState, lim
 		limit = 100
 	}
 	query := `SELECT p.proposal_id, p.type, p.target_id, p.from_id, p.to_id, p.score, p.reason, p.state, p.created_at, p.updated_at,
-COALESCE(f.name, ''), COALESCE(f.current_path, ''), COALESCE(d.name, ''), COALESCE(d.current_path, '')
-FROM proposals p LEFT JOIN files f ON f.file_id = p.target_id LEFT JOIN folders d ON d.folder_id = p.to_id`
+COALESCE(f.name, ''), COALESCE(f.current_path, ''), COALESCE(d.name, ''), COALESCE(d.current_path, ''),
+COALESCE(u.relative_path, '')
+FROM proposals p LEFT JOIN files f ON f.file_id = p.target_id LEFT JOIN folders d ON d.folder_id = p.to_id
+LEFT JOIN upload_origins u ON u.stored_path = f.current_path`
 	args := []any{}
 	if state != "" {
 		query += " WHERE p.state = ?"
@@ -225,11 +228,18 @@ FROM proposals p LEFT JOIN files f ON f.file_id = p.target_id LEFT JOIN folders 
 		return nil, fmt.Errorf("list proposals: %w", err)
 	}
 	defer rows.Close()
-	var proposals []domain.Proposal
+	proposals := make([]domain.Proposal, 0)
 	for rows.Next() {
 		proposal, err := scanProposalWithNames(rows)
 		if err != nil {
 			return nil, err
+		}
+		proposal.SourceKind = db.sourceKind(proposal.FilePath, proposal.SourceRelativePath)
+		if proposal.SourceKind == domain.SourceBrowserUpload {
+			proposal.SourceDirectory = ""
+			proposal.WorkingCopyDirectory = filepath.Dir(proposal.FilePath)
+		} else if proposal.FilePath != "" {
+			proposal.SourceDirectory = filepath.Dir(proposal.FilePath)
 		}
 		proposals = append(proposals, proposal)
 	}
@@ -244,7 +254,8 @@ func scanProposalWithNames(row scanner) (domain.Proposal, error) {
 	var proposalType, state, createdAt, updatedAt string
 	if err := row.Scan(&proposal.ID, &proposalType, &proposal.TargetID, &proposal.FromID,
 		&proposal.ToID, &proposal.Score, &proposal.Reason, &state, &createdAt, &updatedAt,
-		&proposal.FileName, &proposal.FilePath, &proposal.FolderName, &proposal.FolderPath); err != nil {
+		&proposal.FileName, &proposal.FilePath, &proposal.FolderName, &proposal.FolderPath,
+		&proposal.SourceRelativePath); err != nil {
 		return domain.Proposal{}, err
 	}
 	proposal.Type = domain.ProposalType(proposalType)
@@ -256,6 +267,7 @@ func scanProposalWithNames(row scanner) (domain.Proposal, error) {
 	if proposal.UpdatedAt, err = parseTime(updatedAt); err != nil {
 		return domain.Proposal{}, err
 	}
+	proposal.DestinationDirectory = proposal.FolderPath
 	return proposal, nil
 }
 

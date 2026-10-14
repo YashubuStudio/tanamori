@@ -136,7 +136,13 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
     finished_at TEXT,
     file_id TEXT NOT NULL DEFAULT '',
     error TEXT NOT NULL DEFAULT '',
+    source_relative_path TEXT NOT NULL DEFAULT '',
     UNIQUE(kind, path)
+);
+CREATE TABLE IF NOT EXISTS upload_origins (
+    stored_path TEXT PRIMARY KEY,
+    relative_path TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ingest_jobs_claim ON ingest_jobs(kind, status, available_at, created_at);
 CREATE TABLE IF NOT EXISTS queue_lease (
@@ -166,4 +172,31 @@ CREATE INDEX IF NOT EXISTS idx_model_runs_file_folder_recent ON model_runs(
     task, json_extract(input_refs, '$[0]'), json_extract(input_refs, '$[1]'), created_at DESC, run_id DESC
 );
 CREATE INDEX IF NOT EXISTS idx_events_target ON events(target_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at DESC, event_id DESC);
+`
+
+const jobLogSchema = `
+DROP TRIGGER IF EXISTS trg_ingest_job_queued_log;
+DROP TRIGGER IF EXISTS trg_ingest_job_state_log;
+CREATE TRIGGER trg_ingest_job_queued_log AFTER INSERT ON ingest_jobs BEGIN
+    INSERT INTO events(event_id, type, target_id, payload, created_at, correlation_id)
+    VALUES('evt_' || lower(hex(randomblob(16))), 'JOB_QUEUED', NEW.job_id,
+        json_object('path', NEW.path, 'kind', NEW.kind, 'attempts', NEW.attempts,
+            'error', NEW.error, 'relative_path', NEW.source_relative_path),
+        NEW.created_at, NEW.job_id);
+END;
+CREATE TRIGGER trg_ingest_job_state_log AFTER UPDATE ON ingest_jobs
+WHEN NEW.status != OLD.status OR NEW.attempts != OLD.attempts BEGIN
+    INSERT INTO events(event_id, type, target_id, payload, created_at, correlation_id)
+    VALUES('evt_' || lower(hex(randomblob(16))),
+        CASE WHEN NEW.status = 'running' THEN 'JOB_STARTED'
+             WHEN NEW.status = 'succeeded' THEN 'JOB_COMPLETED'
+             WHEN NEW.status = 'failed' THEN 'JOB_FAILED'
+             WHEN NEW.attempts > 0 THEN 'JOB_RETRY'
+             ELSE 'JOB_QUEUED' END,
+        NEW.job_id,
+        json_object('path', NEW.path, 'kind', NEW.kind, 'attempts', NEW.attempts,
+            'error', NEW.error, 'relative_path', NEW.source_relative_path),
+        NEW.updated_at, NEW.job_id);
+END;
 `

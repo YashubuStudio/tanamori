@@ -35,4 +35,4 @@ require (
 	modernc.org/memory v1.12.1 // indirect
 )
 
-replace github.com/YashubuStudio/filetext => ../filetext
+replace github.com/YashubuStudio/filetext => ./third_party/filetext

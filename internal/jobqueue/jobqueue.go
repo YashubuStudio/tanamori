@@ -28,18 +28,20 @@ const (
 )
 
 type Job struct {
-	ID          string     `json:"job_id"`
-	Path        string     `json:"path"`
-	Kind        Kind       `json:"kind"`
-	Status      Status     `json:"status"`
-	Attempts    int        `json:"attempts"`
-	AvailableAt time.Time  `json:"available_at"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-	FileID      string     `json:"file_id,omitempty"`
-	Error       string     `json:"error,omitempty"`
+	ID                 string     `json:"job_id"`
+	Path               string     `json:"path"`
+	Kind               Kind       `json:"kind"`
+	Status             Status     `json:"status"`
+	Attempts           int        `json:"attempts"`
+	AvailableAt        time.Time  `json:"available_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+	FileID             string     `json:"file_id,omitempty"`
+	Error              string     `json:"error,omitempty"`
+	SourceKind         string     `json:"source_kind,omitempty"`
+	SourceRelativePath string     `json:"source_relative_path,omitempty"`
 }
 
 type Counts struct {
@@ -47,6 +49,18 @@ type Counts struct {
 	Running   int64 `json:"running"`
 	Succeeded int64 `json:"succeeded"`
 	Failed    int64 `json:"failed"`
+}
+
+type WorkLog struct {
+	At                 time.Time `json:"at"`
+	EventType          string    `json:"event_type"`
+	JobID              string    `json:"job_id"`
+	Path               string    `json:"path"`
+	Kind               Kind      `json:"kind"`
+	Attempts           int       `json:"attempts"`
+	Error              string    `json:"error,omitempty"`
+	SourceKind         string    `json:"source_kind"`
+	SourceRelativePath string    `json:"source_relative_path,omitempty"`
 }
 
 type Store interface {
@@ -61,6 +75,7 @@ type Store interface {
 	RenewLease(context.Context, string) (bool, error)
 	ReleaseLease(context.Context, string) error
 	RecoverRunning(context.Context) error
+	PauseScan(context.Context, string) error
 }
 
 var ErrQueueFull = errors.New("file queue is full; retry later or enqueue a directory")
@@ -122,6 +137,8 @@ type Runner struct {
 	Log        func(string, ...any)
 }
 
+var errScanDrain = errors.New("directory scan paused for shutdown")
+
 func (r Runner) log(format string, args ...any) {
 	if r.Log != nil {
 		r.Log(format, args...)
@@ -129,6 +146,12 @@ func (r Runner) log(format string, args ...any) {
 }
 
 func (r Runner) Run(ctx context.Context) error {
+	return r.RunUntil(ctx, nil)
+}
+
+// RunUntil stops claiming new jobs when stop is closed, then lets already
+// claimed jobs finish. Canceling ctx still interrupts work for bounded exit.
+func (r Runner) RunUntil(ctx context.Context, stop <-chan struct{}) error {
 	if r.Store == nil || r.Ingest == nil {
 		return errors.New("queue store and ingest function are required")
 	}
@@ -152,10 +175,10 @@ func (r Runner) Run(ctx context.Context) error {
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var heartbeat sync.WaitGroup
+	heartbeat.Add(1)
 	go func() {
-		defer wg.Done()
+		defer heartbeat.Done()
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -172,23 +195,38 @@ func (r Runner) Run(ctx context.Context) error {
 			}
 		}
 	}()
-	wg.Add(1)
-	go func() { defer wg.Done(); r.loop(workCtx, KindScan) }()
+	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() { defer workers.Done(); r.loop(workCtx, stop, KindScan) }()
 	for index := 0; index < r.Workers; index++ {
-		wg.Add(1)
-		go func() { defer wg.Done(); r.loop(workCtx, KindFile) }()
+		workers.Add(1)
+		go func() { defer workers.Done(); r.loop(workCtx, stop, KindFile) }()
 	}
-	<-workCtx.Done()
-	wg.Wait()
-	if ctx.Err() != nil {
+	workersDone := make(chan struct{})
+	go func() { workers.Wait(); close(workersDone) }()
+	graceful := false
+	select {
+	case <-workCtx.Done():
+	case <-workersDone:
+		graceful = true
+		cancel()
+	}
+	workers.Wait()
+	heartbeat.Wait()
+	if ctx.Err() != nil || graceful {
 		return nil
 	}
 	return workCtx.Err()
 }
 
-func (r Runner) loop(ctx context.Context, kind Kind) {
+func (r Runner) loop(ctx context.Context, stop <-chan struct{}, kind Kind) {
 	memoryPaused := false
 	for ctx.Err() == nil {
+		select {
+		case <-stop:
+			return
+		default:
+		}
 		if kind == KindFile {
 			available := AvailableMemory()
 			if available > 0 && available < 1<<30 {
@@ -216,9 +254,17 @@ func (r Runner) loop(ctx context.Context, kind Kind) {
 		}
 		var fileID string
 		if kind == KindScan {
-			err = r.scan(ctx, job.Path)
+			err = r.scan(ctx, stop, job.Path)
 		} else {
 			fileID, err = r.Ingest(ctx, job.Path)
+		}
+		if errors.Is(err, errScanDrain) {
+			pauseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if updateErr := r.Store.PauseScan(pauseCtx, job.ID); updateErr != nil {
+				r.log("pause scan job %s: %v", job.ID, updateErr)
+			}
+			cancel()
+			return
 		}
 		if ctx.Err() != nil {
 			return
@@ -235,7 +281,7 @@ func (r Runner) loop(ctx context.Context, kind Kind) {
 	}
 }
 
-func (r Runner) scan(ctx context.Context, root string) error {
+func (r Runner) scan(ctx context.Context, stop <-chan struct{}, root string) error {
 	info, err := os.Lstat(root)
 	if err != nil {
 		return err
@@ -243,28 +289,38 @@ func (r Runner) scan(ctx context.Context, root string) error {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("scan root is not a regular directory: %s", root)
 	}
-	return r.scanDir(ctx, root)
+	return r.scanDir(ctx, stop, root)
 }
 
 // ReadDir(64) avoids filepath.WalkDir's unbounded per-directory name slice.
-func (r Runner) scanDir(ctx context.Context, directory string) error {
+func (r Runner) scanDir(ctx context.Context, stop <-chan struct{}, directory string) error {
 	input, err := os.Open(directory)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
 	for {
+		select {
+		case <-stop:
+			return errScanDrain
+		default:
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		entries, readErr := input.ReadDir(64)
 		for _, entry := range entries {
+			select {
+			case <-stop:
+				return errScanDrain
+			default:
+			}
 			if entry.Type()&os.ModeSymlink != 0 {
 				continue
 			}
 			path := filepath.Join(directory, entry.Name())
 			if entry.IsDir() {
-				if err := r.scanDir(ctx, path); err != nil {
+				if err := r.scanDir(ctx, stop, path); err != nil {
 					return err
 				}
 				continue
@@ -277,6 +333,11 @@ func (r Runner) scanDir(ctx context.Context, directory string) error {
 				return err
 			}
 			for {
+				select {
+				case <-stop:
+					return errScanDrain
+				default:
+				}
 				count, err := r.Store.OutstandingFiles(ctx)
 				if err != nil {
 					return err

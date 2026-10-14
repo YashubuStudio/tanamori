@@ -1,0 +1,13 @@
+relative_path,expected_label,expected_tags
+01_会計/case-01.txt,会計,会計
+01_会計/case-02.txt,会計,会計
+02_会議/case-03.txt,会議,会議
+02_会議/case-04.txt,会議,会議
+03_斎藤様/case-05.txt,斎藤様,顧客名
+03_斎藤様/case-06.txt,斎藤様,顧客名
+04_鈴木様/case-07.txt,鈴木様,顧客名
+04_鈴木様/case-08.txt,鈴木様,顧客名
+05_ホームページ/case-09.txt,ホームページ,ホームページ
+05_ホームページ/case-10.txt,ホームページ,ホームページ
+06_修正依頼/case-11.txt,修正依頼,修正依頼
+06_修正依頼/case-12.txt,修正依頼,修正依頼

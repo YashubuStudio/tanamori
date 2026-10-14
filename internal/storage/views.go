@@ -14,7 +14,8 @@ func (db *DB) ListRecentJobs(ctx context.Context, limit int) ([]jobqueue.Job, er
 	if limit < 1 || limit > 200 {
 		limit = 50
 	}
-	rows, err := db.sql.QueryContext(ctx, "SELECT "+jobColumns+" FROM ingest_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?", limit)
+	rows, err := db.sql.QueryContext(ctx, "SELECT "+jobColumns+`
+FROM ingest_jobs ORDER BY created_at DESC, job_id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list recent jobs: %w", err)
 	}
@@ -25,6 +26,7 @@ func (db *DB) ListRecentJobs(ctx context.Context, limit int) ([]jobqueue.Job, er
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan recent job: %w", scanErr)
 		}
+		job.SourceKind = db.sourceKind(job.Path, job.SourceRelativePath)
 		jobs = append(jobs, job)
 	}
 	if err := rows.Err(); err != nil {
@@ -43,7 +45,7 @@ WITH recent_files AS (
     SELECT file_id, current_folder_id, name, current_path, extract_status, extract_error, created_at
     FROM files ORDER BY created_at DESC, file_id DESC LIMIT ?
 )
-SELECT f.file_id, f.current_folder_id, f.name, f.current_path,
+SELECT f.file_id, COALESCE(f.current_folder_id, ''), f.name, f.current_path,
        f.extract_status, f.extract_error, f.created_at,
        COALESCE((SELECT json_group_array(tag) FROM file_tags ft WHERE ft.file_id = f.file_id), '[]'),
        COALESCE(current_folder.name, ''),

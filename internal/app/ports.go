@@ -12,6 +12,7 @@ type Repository interface {
 	ListFolders(context.Context) ([]domain.Folder, error)
 	LoadSettings(context.Context) (domain.Settings, error)
 	SaveSettings(context.Context, domain.Settings) error
+	PreviewReset(context.Context) (domain.ResetPreview, error)
 	ResetData(context.Context, bool, bool) (domain.ResetResult, error)
 	SaveIngestion(context.Context, IngestionRecord) (domain.File, *domain.Proposal, error)
 	Search(context.Context, string, int) ([]domain.SearchHit, error)
@@ -21,6 +22,8 @@ type Repository interface {
 	RejectMove(context.Context, string, domain.DecisionActor, string, time.Time) error
 	CompleteMove(context.Context, domain.MoveOperation, string, string, time.Time) error
 	FailMove(context.Context, domain.MoveOperation, string, time.Time) error
+	DeleteUploadOrigin(context.Context, string) error
+	CreateManualProposal(ctx context.Context, fileID, folderID string, score float64, reason string, now time.Time) (domain.Proposal, error)
 }
 
 type Extractor interface {
@@ -42,11 +45,16 @@ type MoveOptions struct {
 }
 
 type MovePreview struct {
-	FileName        string `json:"file_name"`
-	SourcePath      string `json:"source_path"`
-	FolderName      string `json:"folder_name"`
-	DestinationPath string `json:"destination_path"`
-	Conflict        bool   `json:"conflict"`
+	FileName             string `json:"file_name"`
+	SourcePath           string `json:"source_path"`
+	SourceDirectory      string `json:"source_directory"`
+	SourceKind           string `json:"source_kind"`
+	SourceRelativePath   string `json:"source_relative_path,omitempty"`
+	WorkingCopyDirectory string `json:"working_copy_directory,omitempty"`
+	FolderName           string `json:"folder_name"`
+	DestinationPath      string `json:"destination_path"`
+	DestinationDirectory string `json:"destination_directory"`
+	Conflict             bool   `json:"conflict"`
 }
 
 type ScoreRequest struct {
@@ -84,6 +92,7 @@ type IngestResult struct {
 	File           domain.File                 `json:"file"`
 	Extraction     domain.Extraction           `json:"extraction"`
 	Classification domain.ClassificationResult `json:"classification"`
+	Tags           []string                    `json:"tags,omitempty"`
 	Proposal       *domain.Proposal            `json:"proposal,omitempty"`
 	ModelRuns      []domain.ModelRun           `json:"model_runs,omitempty"`
 	CorrelationID  string                      `json:"correlation_id"`

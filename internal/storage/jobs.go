@@ -12,14 +12,15 @@ import (
 	"github.com/YashubuStudio/tanamori/internal/jobqueue"
 )
 
-const jobColumns = "job_id, path, kind, status, attempts, available_at, created_at, updated_at, started_at, finished_at, file_id, error"
+const jobColumns = "job_id, path, kind, status, attempts, available_at, created_at, updated_at, started_at, finished_at, file_id, error, source_relative_path"
 
 func scanJob(row scanner) (jobqueue.Job, error) {
 	var job jobqueue.Job
 	var kind, status, available, created, updated string
 	var started, finished sql.NullString
-	err := row.Scan(&job.ID, &job.Path, &kind, &status, &job.Attempts, &available, &created, &updated,
-		&started, &finished, &job.FileID, &job.Error)
+	fields := []any{&job.ID, &job.Path, &kind, &status, &job.Attempts, &available, &created, &updated,
+		&started, &finished, &job.FileID, &job.Error, &job.SourceRelativePath}
+	err := row.Scan(fields...)
 	if err != nil {
 		return jobqueue.Job{}, err
 	}
@@ -60,16 +61,16 @@ func (db *DB) Put(ctx context.Context, kind jobqueue.Kind, path string, size int
 	}
 	now := formatTime(time.Now().UTC())
 	modtime := formatTime(modified)
-	query := `INSERT INTO ingest_jobs(job_id, path, kind, status, attempts, available_at, created_at, updated_at, file_id, error, source_size, source_mtime)
-VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, '', '', ?, ?)
+	query := `INSERT INTO ingest_jobs(job_id, path, kind, status, attempts, available_at, created_at, updated_at, file_id, error, source_size, source_mtime, source_relative_path)
+VALUES(?, ?, ?, 'queued', 0, ?, ?, ?, '', '', ?, ?, COALESCE((SELECT relative_path FROM upload_origins WHERE stored_path = ?), ''))
 ON CONFLICT(kind, path) DO UPDATE SET
   status='queued', attempts=0, available_at=excluded.available_at, updated_at=excluded.updated_at,
   started_at=NULL, finished_at=NULL, file_id='', error='', source_size=excluded.source_size,
-  source_mtime=excluded.source_mtime
+  source_mtime=excluded.source_mtime, source_relative_path=excluded.source_relative_path
 WHERE ingest_jobs.status != 'running' AND
   (? OR ingest_jobs.source_size != excluded.source_size OR ingest_jobs.source_mtime != excluded.source_mtime)
 RETURNING ` + jobColumns
-	job, err := scanJob(db.sql.QueryRowContext(ctx, query, id, path, kind, now, now, now, size, modtime, force))
+	job, err := scanJob(db.sql.QueryRowContext(ctx, query, id, path, kind, now, now, now, size, modtime, path, force))
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.GetByPath(ctx, kind, path)
 	}
@@ -120,6 +121,23 @@ finished_at=?, updated_at=? WHERE job_id=? AND status='running'`, fileID, format
 	affected, _ := result.RowsAffected()
 	if affected != 1 {
 		return fmt.Errorf("job %s is not running", id)
+	}
+	return nil
+}
+
+// PauseScan returns a deliberately interrupted scan to the queue without
+// consuming a failure attempt. Previously enqueued files remain deduplicated.
+func (db *DB) PauseScan(ctx context.Context, id string) error {
+	now := formatTime(time.Now().UTC())
+	result, err := db.sql.ExecContext(ctx, `UPDATE ingest_jobs SET status='queued',
+attempts=MAX(attempts-1, 0), available_at=?, updated_at=?, started_at=NULL, finished_at=NULL
+WHERE job_id=? AND kind='scan' AND status='running'`, now, now, id)
+	if err != nil {
+		return fmt.Errorf("pause scan: %w", err)
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return fmt.Errorf("scan job %s is not running", id)
 	}
 	return nil
 }

@@ -6,35 +6,79 @@ import (
 	"github.com/YashubuStudio/tanamori/internal/domain"
 )
 
-var tagKeywords = map[string][]string{
-	"会計":     {"会計", "請求", "経費", "売上", "入金", "精算"},
-	"会議":     {"会議", "議事録", "定例", "アジェンダ", "ミーティング", "打合せ"},
-	"ホームページ": {"ホームページ", "ウェブサイト", "webサイト", "サイト制作"},
-	"修正依頼":   {"修正依頼", "修正", "変更依頼"},
+// The keyword fallback deliberately does not claim to infer related tags.
+type semanticTagScorer interface {
+	SupportsSemanticTags() bool
 }
 
-// Document tags are evidence about content, not destination folders.
-func documentTags(name, body string, folders []domain.Folder) []string {
-	content := strings.ToLower(name + "\n" + body)
-	tags := make([]string, 0, len(domain.PriorityTags))
-	for _, tag := range domain.PriorityTags {
-		if tag == "顧客名" {
-			for _, folder := range folders {
-				if strings.HasSuffix(folder.Name, "様") && strings.Contains(content, strings.ToLower(folder.Name)) {
-					tags = append(tags, tag)
-					break
-				}
-			}
-			continue
+type tagSelection struct {
+	Tags      []string
+	FolderIDs map[string]bool
+}
+
+// candidateTags uses scores the semantic model already calculated for managed
+// folders. The labels come from the registered folder taxonomy; no synonym or
+// keyword list is supplied to the model. Scores are relevance, not probability.
+func candidateTags(scorer Scorer, fileName string, folders []domain.Folder, candidates []domain.CandidateScore) tagSelection {
+	semantic, ok := scorer.(semanticTagScorer)
+	if !ok || !semantic.SupportsSemanticTags() || len(candidates) == 0 {
+		return tagSelection{}
+	}
+	best := candidates[0]
+	for _, candidate := range candidates {
+		if candidate.Score > best.Score {
+			best = candidate
 		}
-		for _, keyword := range tagKeywords[tag] {
-			if strings.Contains(content, strings.ToLower(keyword)) {
-				tags = append(tags, tag)
-				break
+	}
+	if best.Score < 0.35 {
+		return tagSelection{}
+	}
+	folderByID := make(map[string]domain.Folder, len(folders))
+	for _, folder := range folders {
+		folderByID[folder.ID] = folder
+	}
+	selection := tagSelection{FolderIDs: make(map[string]bool)}
+	matched := make(map[string]bool, len(domain.PriorityTags))
+	add := func(candidate domain.CandidateScore) {
+		if tag := folderTag(folderByID[candidate.FolderID].Name); tag != "" {
+			selection.FolderIDs[candidate.FolderID] = true
+			matched[tag] = true
+		}
+	}
+	if best.Score >= 0.8 {
+		// At high relevance, an almost-tied higher-priority folder can still be
+		// unrelated. Prefer the model winner unless a registered folder name is
+		// explicitly present in the file name and its score is very close.
+		explicit := false
+		for _, candidate := range candidates {
+			folder := folderByID[candidate.FolderID]
+			if candidate.Score >= best.Score-0.025 && folder.Name != "" &&
+				strings.Contains(strings.ToLower(fileName), strings.ToLower(folder.Name)) {
+				add(candidate)
+				explicit = true
+			}
+		}
+		if !explicit {
+			add(best)
+		}
+	} else {
+		window := 0.06
+		if best.Score >= 0.6 {
+			window = 0.04
+		}
+		for _, candidate := range candidates {
+			if candidate.Score >= best.Score-window {
+				add(candidate)
 			}
 		}
 	}
-	return tags
+	selection.Tags = make([]string, 0, len(matched))
+	for _, tag := range domain.PriorityTags {
+		if matched[tag] {
+			selection.Tags = append(selection.Tags, tag)
+		}
+	}
+	return selection
 }
 
 func folderTag(name string) string {

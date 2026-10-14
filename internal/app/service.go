@@ -8,18 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/YashubuStudio/tanamori/internal/domain"
 )
 
 type Service struct {
-	repository Repository
-	extractor  Extractor
-	scorer     Scorer
-	filesystem Filesystem
-	policy     domain.ClassificationPolicy
-	now        func() time.Time
+	maintenance sync.RWMutex
+	repository  Repository
+	extractor   Extractor
+	scorer      Scorer
+	filesystem  Filesystem
+	policy      domain.ClassificationPolicy
+	now         func() time.Time
 }
 
 func NewService(repository Repository, extractor Extractor, scorer Scorer, filesystem Filesystem, policy domain.ClassificationPolicy) (*Service, error) {
@@ -40,6 +42,8 @@ func NewService(repository Repository, extractor Extractor, scorer Scorer, files
 }
 
 func (service *Service) RegisterFolder(ctx context.Context, path, name, purpose, description string) (domain.Folder, error) {
+	service.maintenance.RLock()
+	defer service.maintenance.RUnlock()
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return domain.Folder{}, fmt.Errorf("resolve folder path: %w", err)
@@ -75,6 +79,8 @@ func (service *Service) RegisterFolder(ctx context.Context, path, name, purpose,
 }
 
 func (service *Service) Ingest(ctx context.Context, path string) (IngestResult, error) {
+	service.maintenance.RLock()
+	defer service.maintenance.RUnlock()
 	observation, err := service.filesystem.Inspect(ctx, path)
 	if err != nil {
 		return IngestResult{}, err
@@ -138,10 +144,11 @@ func (service *Service) Ingest(ctx context.Context, path string) (IngestResult, 
 	if bodyText != "" {
 		leftText += "\n本文:\n" + bodyText
 	}
-	tags := documentTags(observation.Name, bodyText, folders)
 	candidates := make([]domain.CandidateScore, 0, len(folders))
 	modelRuns := make([]domain.ModelRun, 0, len(folders))
+	folderByID := make(map[string]domain.Folder, len(folders))
 	for _, folder := range folders {
+		folderByID[folder.ID] = folder
 		if folder.Status != domain.FolderManaged || folder.Locked {
 			continue
 		}
@@ -162,13 +169,28 @@ func (service *Service) Ingest(ctx context.Context, path string) (IngestResult, 
 			})
 			continue
 		}
-		priority := tagPriority(folder, tags, settings)
 		modelRuns = append(modelRuns, domain.ModelRun{
 			ID: runID, Task: task, ModelVersion: score.ModelVersion,
-			InputRefs: []string{fileID, folder.ID}, Scores: map[string]float64{"score": score.Score, "priority": float64(priority)},
+			InputRefs: []string{fileID, folder.ID}, Scores: map[string]float64{"score": score.Score},
 			Duration: score.Duration, Status: "ok", CreatedAt: now,
 		})
-		candidates = append(candidates, domain.CandidateScore{FolderID: folder.ID, Score: score.Score, Priority: priority, Reason: score.Reason})
+		candidates = append(candidates, domain.CandidateScore{FolderID: folder.ID, Score: score.Score, Reason: score.Reason})
+	}
+	selection := candidateTags(service.scorer, observation.Name, folders, candidates)
+	tags := selection.Tags
+	for index := range candidates {
+		if selection.FolderIDs[candidates[index].FolderID] {
+			candidates[index].Priority = tagPriority(folderByID[candidates[index].FolderID], tags, settings)
+		}
+	}
+	for index := range modelRuns {
+		if modelRuns[index].Status != "ok" {
+			continue
+		}
+		folder := folderByID[modelRuns[index].InputRefs[1]]
+		if selection.FolderIDs[folder.ID] {
+			modelRuns[index].Scores["priority"] = float64(tagPriority(folder, tags, settings))
+		}
 	}
 	classification := service.policy.Evaluate(candidates)
 
@@ -214,7 +236,7 @@ func (service *Service) Ingest(ctx context.Context, path string) (IngestResult, 
 		return IngestResult{}, err
 	}
 	return IngestResult{
-		File: file, Extraction: extraction, Classification: classification,
+		File: file, Extraction: extraction, Classification: classification, Tags: tags,
 		Proposal: proposal, ModelRuns: modelRuns, CorrelationID: correlationID,
 	}, nil
 }
@@ -255,11 +277,19 @@ func (service *Service) GetSettings(ctx context.Context) (domain.Settings, error
 }
 
 func (service *Service) SaveSettings(ctx context.Context, settings domain.Settings) error {
+	service.maintenance.RLock()
+	defer service.maintenance.RUnlock()
 	return service.repository.SaveSettings(ctx, settings)
 }
 
 func (service *Service) ResetData(ctx context.Context, documents, folders bool) (domain.ResetResult, error) {
+	service.maintenance.Lock()
+	defer service.maintenance.Unlock()
 	return service.repository.ResetData(ctx, documents, folders)
+}
+
+func (service *Service) PreviewReset(ctx context.Context) (domain.ResetPreview, error) {
+	return service.repository.PreviewReset(ctx)
 }
 
 func (service *Service) PreviewMoveProposal(ctx context.Context, proposalID string) (MovePreview, error) {
@@ -272,15 +302,48 @@ func (service *Service) PreviewMoveProposal(ctx context.Context, proposalID stri
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return MovePreview{}, statErr
 	}
-	return MovePreview{FileName: operation.File.Name, SourcePath: operation.File.CurrentPath,
-		FolderName: operation.Folder.Name, DestinationPath: destination, Conflict: statErr == nil}, nil
+	sourceDirectory := filepath.Dir(operation.File.CurrentPath)
+	workingCopyDirectory := ""
+	if operation.SourceKind == domain.SourceBrowserUpload {
+		sourceDirectory = ""
+		workingCopyDirectory = filepath.Dir(operation.File.CurrentPath)
+	}
+	return MovePreview{
+		FileName: operation.File.Name, SourcePath: operation.File.CurrentPath,
+		SourceDirectory: sourceDirectory, SourceKind: operation.SourceKind,
+		SourceRelativePath: operation.SourceRelativePath, WorkingCopyDirectory: workingCopyDirectory,
+		FolderName: operation.Folder.Name, DestinationPath: destination,
+		DestinationDirectory: operation.Folder.CurrentPath, Conflict: statErr == nil,
+	}, nil
 }
 
 func (service *Service) RejectMoveProposal(ctx context.Context, proposalID, reason string) error {
+	service.maintenance.RLock()
+	defer service.maintenance.RUnlock()
 	return service.repository.RejectMove(ctx, proposalID, domain.ActorUser, reason, service.now())
 }
 
+// ProposeMove records a pending move proposal for a destination the model
+// left unclassified or ranked below its own candidate. It never moves the
+// file: the existing apply/reject flow still requires explicit confirmation.
+func (service *Service) ProposeMove(ctx context.Context, fileID, folderID string, score float64, reason string) (domain.Proposal, error) {
+	service.maintenance.RLock()
+	defer service.maintenance.RUnlock()
+	if strings.TrimSpace(fileID) == "" || strings.TrimSpace(folderID) == "" {
+		return domain.Proposal{}, fmt.Errorf("file and folder are required")
+	}
+	if score < 0 || score > 1 {
+		return domain.Proposal{}, fmt.Errorf("score must be between 0 and 1")
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "ユーザーが候補から分類先を選択"
+	}
+	return service.repository.CreateManualProposal(ctx, fileID, folderID, score, reason, service.now())
+}
+
 func (service *Service) ApplyMoveProposal(ctx context.Context, proposalID string, actor domain.DecisionActor, reason string, options ...MoveOptions) (MoveResult, error) {
+	service.maintenance.RLock()
+	defer service.maintenance.RUnlock()
 	settings, err := service.repository.LoadSettings(ctx)
 	if err != nil {
 		return MoveResult{}, err
@@ -316,5 +379,10 @@ func (service *Service) ApplyMoveProposal(ctx context.Context, proposalID string
 	if err := service.repository.CompleteMove(ctx, operation, move.ToPath, move.SHA256, service.now()); err != nil {
 		return move, fmt.Errorf("file moved but database finalization failed: %w", err)
 	}
+	// Best-effort: the moved file no longer exists at its pre-move stored
+	// path, so a stale upload_origins row would otherwise block a future
+	// browser upload that reuses the same relative path. Local-path moves
+	// have no matching row, so this is a harmless no-op for them.
+	_ = service.repository.DeleteUploadOrigin(ctx, operation.File.CurrentPath)
 	return move, nil
 }

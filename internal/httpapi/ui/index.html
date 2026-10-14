@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <title>TANAMORI</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <link rel="stylesheet" href="/styles.css">
   <script src="/app.js" defer></script>
 </head>
@@ -35,10 +36,12 @@
         <div>
           <p class="eyebrow">DOCUMENT ORGANIZER</p>
           <h1>文書の居場所を、ひと目で。</h1>
+          <p id="shutdownMessage" class="shutdown-message" role="status" aria-live="polite"></p>
         </div>
         <div class="status-cluster">
-          <span id="serverStatus" class="status ok">サーバー稼働中</span>
+          <span id="serverStatus" class="status ok" role="status" aria-live="polite">サーバー稼働中</span>
           <button id="refreshAll" class="icon-button" type="button" title="すべて更新" aria-label="すべて更新">↻</button>
+          <button id="shutdownButton" class="shutdown-button" type="button" title="TANAMORIを正規終了">正規終了</button>
         </div>
       </header>
 
@@ -85,7 +88,7 @@
             <div><p class="eyebrow">ADD TO QUEUE</p><h2>ファイル・フォルダーを取り込む</h2></div>
             <span class="step quiet">02</span>
           </div>
-          <p class="muted">ファイル・フォルダーを下へドロップするか、選択してください。ブラウザーからの選択ではローカル保管領域にコピーしてから順次キューへ登録します。元ファイルは変更しません。</p>
+          <p class="muted">ファイル・フォルダーを下へドロップするか、選択してください。ブラウザーからの選択ではローカル保管領域にコピーしてから順次キューへ登録します。元ファイルは変更しません。ただし、ブラウザーは元ファイルの絶対パスを渡さないため、元の場所を記録したい場合は下の「取り込むパス」に絶対パスを入力してください。</p>
           <div id="dropZone" class="drop-zone" tabindex="0" role="group" aria-label="ファイル・フォルダーをドロップ">
             <strong>ここにファイル・フォルダーをドロップ</strong>
             <div class="drop-actions">
@@ -111,6 +114,15 @@
           <div><p class="eyebrow">QUEUE ACTIVITY</p><h2>最近の処理</h2></div>
           <button class="text-button" data-refresh="jobs" type="button">更新</button>
         </div>
+        <div class="filter-bar">
+          <select id="jobFilterStatus" aria-label="状態で絞り込み">
+            <option value="">すべての状態</option>
+            <option value="queued">待機中</option>
+            <option value="running">処理中</option>
+            <option value="succeeded">完了</option>
+            <option value="failed">失敗</option>
+          </select>
+        </div>
         <div class="table-wrap">
           <table>
             <thead><tr><th>状態</th><th>対象</th><th>種類</th><th>試行</th><th>詳細</th></tr></thead>
@@ -119,12 +131,31 @@
         </div>
       </section>
 
+      <section class="section">
+        <div class="section-title">
+          <div><p class="eyebrow">WORK LOG</p><h2>作業ログ</h2><p class="muted">最近の受付・開始・完了・失敗を時刻順に表示します。エラーと再試行も確認できます。</p></div>
+          <button class="text-button" data-refresh="jobs" type="button">更新</button>
+        </div>
+        <ol id="workLog" class="work-log"><li class="empty-card">読み込み中…</li></ol>
+      </section>
+
       <section id="classifications" class="section">
         <div class="section-title">
           <div><p class="eyebrow">CLASSIFICATION</p><h2>分類結果</h2><p class="muted">「一致」は、AIの第1候補と現在の分類先が同じことを示します。</p></div>
           <button class="text-button" data-refresh="classifications" type="button">更新</button>
         </div>
         <div id="classificationSummary" class="result-summary"></div>
+        <div class="filter-bar">
+          <input id="classificationFilterText" type="search" placeholder="名前・パスで絞り込み">
+          <select id="classificationFilterStatus" aria-label="状態で絞り込み">
+            <option value="">すべての状態</option>
+            <option value="match">一致</option>
+            <option value="mismatch">不一致</option>
+            <option value="proposal">移動提案</option>
+            <option value="failed">抽出失敗</option>
+            <option value="queued">未判定</option>
+          </select>
+        </div>
         <div id="classificationList" class="result-list"><div class="empty-card">まだ分類結果がありません。</div></div>
       </section>
 
@@ -170,7 +201,7 @@
       <section id="settings" class="section grid-two">
         <article class="panel">
           <div class="panel-heading"><div><p class="eyebrow">CLASSIFICATION RULES</p><h2>分類の優先度・命名</h2></div></div>
-          <p class="muted">文書には関連タグを別に記録します。複数のタグが該当した場合、数値が高い分類先を優先します。同点ならモデルの関連度を使います。</p>
+          <p class="muted">関連タグはBGEの分類先スコアから自動で決め、固定キーワード表は使いません。判定が曖昧な場合や分類先名がファイル名に現れる場合に優先度を適用します。BGE未使用時はタグ優先度を適用しません。</p>
           <form id="settingsForm">
             <div class="priority-grid">
               <label>会計<input id="priorityAccounting" type="number" min="0" max="1000" required></label>
@@ -187,7 +218,7 @@
         </article>
         <article class="panel danger-panel">
           <div class="panel-heading"><div><p class="eyebrow">TEST DATA RESET</p><h2>登録データを一括削除</h2></div></div>
-          <p class="muted">TANAMORIのDB内にある文書索引・処理履歴・分類先登録を削除します。PC上の元ファイル、取り込み時に作成したローカルコピー、AIモデルは削除しません。処理中のジョブがある間は実行できません。</p>
+          <p class="muted">TANAMORIのDB内にある文書索引・処理履歴・分類先登録を削除します。削除前にDB全体をバックアップし、保存先を表示します。バックアップに失敗した場合は削除しません。PC上の元ファイル、取り込み時に作成したローカルコピー、AIモデルは削除しません。処理中のジョブがある間は実行できません。</p>
           <form id="resetForm">
             <label class="check-row"><input id="resetDocuments" type="checkbox" checked>文書データと処理履歴</label>
             <label class="check-row"><input id="resetFolders" type="checkbox" checked>分類先の登録</label>

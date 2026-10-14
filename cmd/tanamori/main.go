@@ -63,6 +63,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	modelRoot := flags.String("model-root", preferredModelRoot(), "per-user AI model and runtime directory")
 	python := flags.String("python", "", "64-bit Python 3.10+ executable used during model setup")
 	force := flags.Bool("force", false, "refresh the isolated runtime and model snapshot")
+	expected := flags.String("expected", "", "evaluation CSV with relative_path,expected_label,expected_tags")
+	backupPath := flags.String("backup", "", "verified backup database path for restore")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -98,6 +100,26 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return writeJSON(stdout, stderr, status)
 	}
 
+	if command == "evaluate" {
+		report, evaluationErr := evaluate(ctx, *expected, installer)
+		if evaluationErr != nil {
+			fmt.Fprintln(stderr, "tanamori:", evaluationErr)
+			return 1
+		}
+		return writeJSON(stdout, stderr, report)
+	}
+	if command == "restore" {
+		if strings.TrimSpace(*backupPath) == "" {
+			fmt.Fprintln(stderr, "tanamori: --backup is required")
+			return 2
+		}
+		if err := storage.RestoreBackup(ctx, *backupPath, *dbPath); err != nil {
+			fmt.Fprintln(stderr, "tanamori:", err)
+			return 1
+		}
+		return writeJSON(stdout, stderr, map[string]string{"database": *dbPath, "restored_from": *backupPath})
+	}
+
 	db, err := storage.Open(ctx, *dbPath)
 	if err != nil {
 		fmt.Fprintln(stderr, "tanamori:", err)
@@ -110,6 +132,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if command == "init" {
 		return writeJSON(stdout, stderr, map[string]string{"database": *dbPath, "status": "ready"})
+	}
+	if command == "backup" {
+		path, backupErr := db.Backup(ctx)
+		if backupErr != nil {
+			fmt.Fprintln(stderr, "tanamori:", backupErr)
+			return 1
+		}
+		return writeJSON(stdout, stderr, map[string]string{"backup_path": path})
 	}
 	if command == "enqueue" {
 		if strings.TrimSpace(*path) == "" {
@@ -301,5 +331,8 @@ func usage(output io.Writer) {
 	fmt.Fprintln(output, "  model-status show local BGE model readiness")
 	fmt.Fprintln(output, "  model-install install or update the local BGE model")
 	fmt.Fprintln(output, "  model-verify verify the complete model weight SHA-256")
+	fmt.Fprintln(output, "  evaluate     score a labeled CSV in an isolated in-memory database")
+	fmt.Fprintln(output, "  backup       create a verified SQLite backup beside --db")
+	fmt.Fprintln(output, "  restore      restore --backup FILE into a new --db path")
 	fmt.Fprintln(output, "  version      print the application version")
 }

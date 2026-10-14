@@ -124,6 +124,8 @@ func NewBGEReranker(config BGEConfig) (*BGEReranker, error) {
 // Score treats the extracted file text as the retrieval query and the concise
 // folder description as the candidate passage. This matches the reranker's
 // query/passage semantics and produces well-separated folder relevance scores.
+func (*BGEReranker) SupportsSemanticTags() bool { return true }
+
 func (reranker *BGEReranker) Score(ctx context.Context, request app.ScoreRequest) (app.ScoreResult, error) {
 	started := time.Now()
 	if err := ctx.Err(); err != nil {

@@ -84,6 +84,12 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := transaction.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
+	if err := migrateJobOrigins(ctx, transaction); err != nil {
+		return err
+	}
+	if _, err := transaction.ExecContext(ctx, jobLogSchema); err != nil {
+		return fmt.Errorf("apply job log triggers: %w", err)
+	}
 	if _, err := transaction.ExecContext(ctx,
 		"INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", formatTime(time.Now().UTC())); err != nil {
 		return fmt.Errorf("record schema migration: %w", err)
@@ -92,10 +98,45 @@ func (db *DB) Migrate(ctx context.Context) error {
 		"INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", formatTime(time.Now().UTC())); err != nil {
 		return fmt.Errorf("record tag schema migration: %w", err)
 	}
+	if _, err := transaction.ExecContext(ctx,
+		"INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", formatTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("record upload origin and work log schema migration: %w", err)
+	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
+}
+
+// Existing queues predate the per-job origin snapshot. Prefer their latest
+// recorded event so reusing an incoming path cannot change historical origins.
+func migrateJobOrigins(ctx context.Context, tx *sql.Tx) error {
+	var present int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('ingest_jobs')
+WHERE name = 'source_relative_path'`).Scan(&present); err != nil {
+		return fmt.Errorf("inspect job origin schema: %w", err)
+	}
+	if present == 0 {
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE ingest_jobs ADD COLUMN source_relative_path TEXT NOT NULL DEFAULT ''"); err != nil {
+			return fmt.Errorf("add job origin snapshot: %w", err)
+		}
+	}
+	var applied int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 4").Scan(&applied); err != nil {
+		return err
+	}
+	if applied == 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE ingest_jobs SET source_relative_path = COALESCE(
+    (SELECT NULLIF(json_extract(payload, '$.relative_path'), '') FROM events
+     WHERE target_id = ingest_jobs.job_id AND type IN ('JOB_QUEUED','JOB_STARTED','JOB_RETRY','JOB_COMPLETED','JOB_FAILED')
+       AND json_valid(payload) AND COALESCE(json_extract(payload, '$.relative_path'), '') != ''
+     ORDER BY created_at DESC, event_id DESC LIMIT 1),
+    (SELECT relative_path FROM upload_origins WHERE stored_path = ingest_jobs.path), '')`); err != nil {
+			return fmt.Errorf("backfill job origins: %w", err)
+		}
+	}
+	_, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)", formatTime(time.Now().UTC()))
+	return err
 }
 
 func formatTime(value time.Time) string {

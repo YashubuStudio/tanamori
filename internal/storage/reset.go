@@ -3,15 +3,48 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/YashubuStudio/tanamori/internal/domain"
 )
 
+func (db *DB) PreviewReset(ctx context.Context) (domain.ResetPreview, error) {
+	var preview domain.ResetPreview
+	err := db.sql.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM files),
+		(SELECT COUNT(*) FROM folders),
+		(SELECT COUNT(*) FROM ingest_jobs),
+		(SELECT COUNT(*) FROM ingest_jobs WHERE status IN ('queued','running'))`).Scan(
+		&preview.Files, &preview.Folders, &preview.Jobs, &preview.ActiveJobs)
+	if err != nil {
+		return domain.ResetPreview{}, err
+	}
+	return preview, nil
+}
+
 // ResetData removes indexed application data only. Source files and model weights are untouched.
-func (db *DB) ResetData(ctx context.Context, documents, folders bool) (domain.ResetResult, error) {
+func (db *DB) ResetData(ctx context.Context, documents, folders bool) (result domain.ResetResult, err error) {
 	if !documents && !folders {
 		return domain.ResetResult{}, fmt.Errorf("select documents or folders")
 	}
+	preview, err := db.PreviewReset(ctx)
+	if err != nil {
+		return domain.ResetResult{}, err
+	}
+	if preview.ActiveJobs > 0 {
+		return domain.ResetResult{}, fmt.Errorf("wait for %d queued or running jobs before clearing data", preview.ActiveJobs)
+	}
+	backupPath, err := db.Backup(ctx)
+	if err != nil {
+		return domain.ResetResult{}, err
+	}
+	// From here on, any error must not leave an unused backup behind: a
+	// backup is only meaningful alongside the delete it was made for.
+	defer func() {
+		if err != nil {
+			_ = os.Remove(backupPath)
+		}
+	}()
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.ResetResult{}, err
@@ -24,7 +57,7 @@ func (db *DB) ResetData(ctx context.Context, documents, folders bool) (domain.Re
 	if active != 0 {
 		return domain.ResetResult{}, fmt.Errorf("wait for %d queued or running jobs before clearing data", active)
 	}
-	result := domain.ResetResult{}
+	result = domain.ResetResult{BackupPath: backupPath}
 	if documents || folders {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM decisions"); err != nil {
 			return result, err
@@ -34,7 +67,7 @@ func (db *DB) ResetData(ctx context.Context, documents, folders bool) (domain.Re
 		}
 	}
 	if documents {
-		for _, table := range []string{"model_runs", "file_search", "file_tags", "extracted_chunks", "file_versions"} {
+		for _, table := range []string{"model_runs", "file_search", "file_tags", "extracted_chunks", "file_versions", "upload_origins"} {
 			if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 				return result, err
 			}

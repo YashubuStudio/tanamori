@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/YashubuStudio/tanamori/internal/app"
@@ -50,14 +51,17 @@ func runServer(ctx context.Context, db *storage.DB, service *app.Service, addres
 	}
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	shutdownRequested := make(chan struct{})
 	workerDone := make(chan error, 1)
-	go func() { workerDone <- runner.Run(workCtx) }()
+	go func() { workerDone <- runner.RunUntil(workCtx, shutdownRequested) }()
+	var shutdownOnce sync.Once
 	server := &http.Server{
 		Handler: httpapi.UIHandler(db, service, queueLimit, httpapi.AppInfo{
 			Version: version, ModelReady: model.Ready, ModelID: model.ModelID,
 			ModelMessage: model.Message, Workers: workers, QueueLimit: queueLimit,
 			TestPath:   nearbyTestPath(),
 			UploadRoot: filepath.Join(filepath.Dir(db.Path()), "incoming"),
+			Shutdown:   func() { shutdownOnce.Do(func() { close(shutdownRequested) }) },
 		}),
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 2 * time.Minute,
 		WriteTimeout: 2 * time.Minute, IdleTimeout: 60 * time.Second,
@@ -73,6 +77,7 @@ func runServer(ctx context.Context, db *storage.DB, service *app.Service, addres
 	}
 	var result error
 	workerFinished := false
+	graceful := false
 	select {
 	case err := <-workerDone:
 		workerFinished = true
@@ -82,15 +87,43 @@ func runServer(ctx context.Context, db *storage.DB, service *app.Service, addres
 			result = err
 		}
 	case <-ctx.Done():
+	case <-shutdownRequested:
+		logger.Print("graceful shutdown requested from Web UI")
+		graceful = true
 	}
-	cancel()
+	if !graceful {
+		cancel()
+	}
 	shutdownCtx, stop := context.WithTimeout(context.Background(), 10*time.Second)
 	defer stop()
 	if err := server.Shutdown(shutdownCtx); err != nil && result == nil {
 		result = err
 	}
 	if !workerFinished {
-		if err := <-workerDone; err != nil && result == nil {
+		if graceful {
+			select {
+			case err := <-workerDone:
+				if err != nil && result == nil {
+					result = err
+				}
+			case <-time.After(2 * time.Minute):
+				logger.Print("graceful drain timed out; remaining jobs will resume on next start")
+				cancel()
+				// cancel() only asks workers to stop; a worker blocked in a
+				// call that ignores ctx (e.g. a stuck model inference) could
+				// otherwise keep this bounded shutdown waiting forever. Give
+				// it a short grace period and then return regardless so
+				// "正規終了" always completes in bounded time.
+				select {
+				case err := <-workerDone:
+					if err != nil && result == nil {
+						result = err
+					}
+				case <-time.After(15 * time.Second):
+					logger.Print("worker did not stop after cancel; exiting without waiting further")
+				}
+			}
+		} else if err := <-workerDone; err != nil && result == nil {
 			result = err
 		}
 	}

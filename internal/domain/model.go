@@ -100,21 +100,31 @@ type ExtractedChunk struct {
 }
 
 type Proposal struct {
-	ID         string        `json:"proposal_id"`
-	Type       ProposalType  `json:"type"`
-	TargetID   string        `json:"target_id"`
-	FromID     string        `json:"from_id,omitempty"`
-	ToID       string        `json:"to_id,omitempty"`
-	Score      float64       `json:"score"`
-	Reason     string        `json:"reason,omitempty"`
-	State      ProposalState `json:"state"`
-	CreatedAt  time.Time     `json:"created_at"`
-	UpdatedAt  time.Time     `json:"updated_at"`
-	FileName   string        `json:"file_name,omitempty"`
-	FilePath   string        `json:"file_path,omitempty"`
-	FolderName string        `json:"folder_name,omitempty"`
-	FolderPath string        `json:"folder_path,omitempty"`
+	ID                   string        `json:"proposal_id"`
+	Type                 ProposalType  `json:"type"`
+	TargetID             string        `json:"target_id"`
+	FromID               string        `json:"from_id,omitempty"`
+	ToID                 string        `json:"to_id,omitempty"`
+	Score                float64       `json:"score"`
+	Reason               string        `json:"reason,omitempty"`
+	State                ProposalState `json:"state"`
+	CreatedAt            time.Time     `json:"created_at"`
+	UpdatedAt            time.Time     `json:"updated_at"`
+	FileName             string        `json:"file_name,omitempty"`
+	FilePath             string        `json:"file_path,omitempty"`
+	SourceDirectory      string        `json:"source_directory,omitempty"`
+	SourceKind           string        `json:"source_kind,omitempty"`
+	SourceRelativePath   string        `json:"source_relative_path,omitempty"`
+	WorkingCopyDirectory string        `json:"working_copy_directory,omitempty"`
+	FolderName           string        `json:"folder_name,omitempty"`
+	FolderPath           string        `json:"folder_path,omitempty"`
+	DestinationDirectory string        `json:"destination_directory,omitempty"`
 }
+
+const (
+	SourceLocalPath     = "local_path"
+	SourceBrowserUpload = "browser_upload"
+)
 
 type Decision struct {
 	ID         string        `json:"decision_id"`
@@ -209,13 +219,23 @@ type SearchHit struct {
 }
 
 type MoveOperation struct {
-	Proposal Proposal `json:"proposal"`
-	File     File     `json:"file"`
-	Folder   Folder   `json:"folder"`
+	Proposal           Proposal `json:"proposal"`
+	File               File     `json:"file"`
+	Folder             Folder   `json:"folder"`
+	SourceKind         string   `json:"source_kind,omitempty"`
+	SourceRelativePath string   `json:"source_relative_path,omitempty"`
 }
 
 type ResetResult struct {
-	Files   int64 `json:"files"`
-	Folders int64 `json:"folders"`
-	Jobs    int64 `json:"jobs"`
+	Files      int64  `json:"files"`
+	Folders    int64  `json:"folders"`
+	Jobs       int64  `json:"jobs"`
+	BackupPath string `json:"backup_path,omitempty"`
+}
+
+type ResetPreview struct {
+	Files      int64 `json:"files"`
+	Folders    int64 `json:"folders"`
+	Jobs       int64 `json:"jobs"`
+	ActiveJobs int64 `json:"active_jobs"`
 }

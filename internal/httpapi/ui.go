@@ -33,10 +33,15 @@ type AppInfo struct {
 	QueueLimit   int64  `json:"queue_limit"`
 	TestPath     string `json:"test_path,omitempty"`
 	UploadRoot   string `json:"-"`
+	Shutdown     func() `json:"-"`
 }
 
 type recentJobLister interface {
 	ListRecentJobs(context.Context, int) ([]jobqueue.Job, error)
+}
+
+type workLogLister interface {
+	ListWorkLogs(context.Context, int) ([]jobqueue.WorkLog, error)
 }
 
 type classificationLister interface {
@@ -53,6 +58,24 @@ func UIHandler(store jobqueue.Store, manager *app.Service, queueLimit int64, inf
 
 	mux.HandleFunc("GET /v1/app", func(w http.ResponseWriter, r *http.Request) {
 		write(w, http.StatusOK, info)
+	})
+	mux.HandleFunc("POST /v1/shutdown", func(w http.ResponseWriter, r *http.Request) {
+		if info.Shutdown == nil {
+			problem(w, http.StatusServiceUnavailable, fmt.Errorf("shutdown is unavailable"))
+			return
+		}
+		// A custom header prevents a cross-site HTML form from stopping the
+		// loopback-only server. Browsers cannot send it cross-origin without a
+		// preflight, and this server does not enable CORS.
+		if r.Header.Get("X-Tanamori-Action") != "shutdown" {
+			problem(w, http.StatusForbidden, fmt.Errorf("shutdown confirmation header is required"))
+			return
+		}
+		write(w, http.StatusAccepted, map[string]string{"status": "shutting_down"})
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		go info.Shutdown()
 	})
 	mux.HandleFunc("GET /v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		settings, err := manager.GetSettings(r.Context())
@@ -94,6 +117,14 @@ func UIHandler(store jobqueue.Store, manager *app.Service, queueLimit int64, inf
 			return
 		}
 		write(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("GET /v1/data/preview", func(w http.ResponseWriter, r *http.Request) {
+		preview, err := manager.PreviewReset(r.Context())
+		if err != nil {
+			problem(w, http.StatusInternalServerError, err)
+			return
+		}
+		write(w, http.StatusOK, preview)
 	})
 	mux.HandleFunc("POST /v1/uploads", func(w http.ResponseWriter, r *http.Request) {
 		if info.UploadRoot == "" {
@@ -171,6 +202,24 @@ func UIHandler(store jobqueue.Store, manager *app.Service, queueLimit int64, inf
 		}
 		write(w, http.StatusOK, jobs)
 	})
+	mux.HandleFunc("GET /v1/work-logs", func(w http.ResponseWriter, r *http.Request) {
+		lister, ok := store.(workLogLister)
+		if !ok {
+			problem(w, http.StatusNotImplemented, fmt.Errorf("work logs are unavailable"))
+			return
+		}
+		limit, err := requestLimit(r, 100, 200)
+		if err != nil {
+			problem(w, http.StatusBadRequest, err)
+			return
+		}
+		logs, err := lister.ListWorkLogs(r.Context(), limit)
+		if err != nil {
+			problem(w, http.StatusInternalServerError, err)
+			return
+		}
+		write(w, http.StatusOK, logs)
+	})
 	mux.HandleFunc("GET /v1/classifications", func(w http.ResponseWriter, r *http.Request) {
 		lister, ok := store.(classificationLister)
 		if !ok {
@@ -188,6 +237,23 @@ func UIHandler(store jobqueue.Store, manager *app.Service, queueLimit int64, inf
 			return
 		}
 		write(w, http.StatusOK, items)
+	})
+	mux.HandleFunc("POST /v1/classifications/{file_id}/propose", func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			FolderID string  `json:"folder_id"`
+			Score    float64 `json:"score"`
+			Reason   string  `json:"reason"`
+		}
+		if err := decodeRequest(w, r, &request); err != nil {
+			problem(w, http.StatusBadRequest, err)
+			return
+		}
+		proposal, err := manager.ProposeMove(r.Context(), r.PathValue("file_id"), request.FolderID, request.Score, request.Reason)
+		if err != nil {
+			problem(w, http.StatusBadRequest, err)
+			return
+		}
+		write(w, http.StatusCreated, proposal)
 	})
 	mux.HandleFunc("GET /v1/proposals", func(w http.ResponseWriter, r *http.Request) {
 		state := domain.ProposalState(strings.TrimSpace(r.URL.Query().Get("state")))
@@ -255,6 +321,10 @@ func UIHandler(store jobqueue.Store, manager *app.Service, queueLimit int64, inf
 	mux.Handle("GET /{$}", static)
 	mux.Handle("GET /styles.css", static)
 	mux.Handle("GET /app.js", static)
+	mux.Handle("GET /favicon.svg", static)
+	mux.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.Handle("/", base)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +336,7 @@ func UIHandler(store jobqueue.Store, manager *app.Service, queueLimit int64, inf
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
 		mux.ServeHTTP(w, r)
 	})
 }

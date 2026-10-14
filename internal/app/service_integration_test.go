@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/YashubuStudio/tanamori/internal/app"
 	"github.com/YashubuStudio/tanamori/internal/domain"
@@ -19,6 +20,18 @@ import (
 type failingScorer struct{}
 
 type changingExtractor struct{}
+
+type blockingExtractor struct{ started, release chan struct{} }
+
+func (extractor blockingExtractor) Extract(ctx context.Context, path string) (domain.Extraction, error) {
+	close(extractor.started)
+	select {
+	case <-extractor.release:
+		return domain.Extraction{Format: "text", Chunks: []string{"契約書"}}, nil
+	case <-ctx.Done():
+		return domain.Extraction{}, ctx.Err()
+	}
+}
 
 func (changingExtractor) Extract(ctx context.Context, path string) (domain.Extraction, error) {
 	if err := os.WriteFile(path, []byte("changed while extracting"), 0o600); err != nil {
@@ -71,6 +84,16 @@ func TestIngestSearchApproveMoveEndToEnd(t *testing.T) {
 	if len(pending) != 1 || pending[0].FileName != "新着契約.txt" || pending[0].FolderName != "契約書" {
 		t.Fatalf("proposal names are missing: %#v", pending)
 	}
+	if pending[0].SourceKind != domain.SourceLocalPath || pending[0].SourceDirectory != root || pending[0].WorkingCopyDirectory != "" || pending[0].DestinationDirectory != destination {
+		t.Fatalf("proposal directories are incorrect: %#v", pending[0])
+	}
+	preview, err := service.PreviewMoveProposal(ctx, pending[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.SourceKind != domain.SourceLocalPath || preview.SourceDirectory != root || preview.WorkingCopyDirectory != "" || preview.DestinationDirectory != destination || preview.SourcePath != source || preview.DestinationPath != filepath.Join(destination, filepath.Base(source)) {
+		t.Fatalf("move preview paths are incorrect: %#v", preview)
+	}
 	hits, err := service.Search(ctx, "契約書", 10)
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +117,72 @@ func TestIngestSearchApproveMoveEndToEnd(t *testing.T) {
 	}
 	if len(applied) != 1 || applied[0].ID != ingested.Proposal.ID {
 		t.Fatalf("proposal was not applied: %#v", applied)
+	}
+}
+
+func TestProposeMoveForUnclassifiedFile(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	accounting := filepath.Join(root, "会計")
+	website := filepath.Join(root, "ホームページ")
+	for _, directory := range []string{accounting, website} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := filepath.Join(root, "unsorted.txt")
+	if err := os.WriteFile(source, []byte("今日の天気とランチの感想についての雑記。"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(ctx, filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	service, err := app.NewService(db, extract.DefaultAdapter(), scoring.KeywordScorer{}, filesystem.Local{}, domain.DefaultClassificationPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountingFolder, err := service.RegisterFolder(ctx, accounting, "会計", "経費精算、請求書、入金管理", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RegisterFolder(ctx, website, "ホームページ", "サイト制作、進行管理", ""); err != nil {
+		t.Fatal(err)
+	}
+	ingested, err := service.Ingest(ctx, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ingested.Proposal != nil || ingested.Classification.Action != domain.ClassificationUnclassified {
+		t.Fatalf("expected the file to be left unclassified: %#v", ingested.Classification)
+	}
+	proposal, err := service.ProposeMove(ctx, ingested.File.ID, accountingFolder.ID, 0.42, "テスト用の手動選択")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.FileName != "unsorted.txt" || proposal.FolderName != "会計" || proposal.Score != 0.42 ||
+		proposal.State != domain.ProposalPending || proposal.DestinationDirectory != accounting {
+		t.Fatalf("unexpected manual proposal: %#v", proposal)
+	}
+	if _, err := service.ProposeMove(ctx, ingested.File.ID, accountingFolder.ID, 0.1, ""); err == nil {
+		t.Fatal("expected a second proposal for the same pending file to be rejected")
+	}
+	if _, err := service.ProposeMove(ctx, "fil_missing", accountingFolder.ID, 0.1, ""); err == nil {
+		t.Fatal("expected proposing for an unknown file to fail")
+	}
+	move, err := service.ApplyMoveProposal(ctx, proposal.ID, domain.ActorUser, "手動で承認")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(move.ToPath); err != nil {
+		t.Fatalf("expected moved file at %q: %v", move.ToPath, err)
+	}
+	if _, err := service.ProposeMove(ctx, ingested.File.ID, accountingFolder.ID, 0.9, ""); err == nil {
+		t.Fatal("expected proposing the folder the file is already in to fail")
 	}
 }
 
@@ -135,6 +224,24 @@ func TestResetIndexedDataKeepsPhysicalFilesAndSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if result.BackupPath == "" {
+		t.Fatal("reset did not report a backup")
+	}
+	restoredPath := filepath.Join(root, "restored.db")
+	if err := storage.RestoreBackup(ctx, result.BackupPath, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := storage.Open(ctx, restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if folders, err := restored.ListFolders(ctx); err != nil || len(folders) != 1 {
+		t.Fatalf("folder was not restored: %#v, %v", folders, err)
+	}
+	if hits, err := restored.Search(ctx, "契約書", 10); err != nil || len(hits) != 1 {
+		t.Fatalf("document was not restored: %#v, %v", hits, err)
+	}
 	if result.Files != 1 || result.Folders != 1 {
 		t.Fatalf("reset counts: %#v", result)
 	}
@@ -150,6 +257,79 @@ func TestResetIndexedDataKeepsPhysicalFilesAndSettings(t *testing.T) {
 	got, err := service.GetSettings(ctx)
 	if err != nil || got.Priorities["会議"] != 120 {
 		t.Fatalf("settings were reset: %#v, %v", got, err)
+	}
+}
+
+func TestResetWaitsForIngestBeforeBackingUp(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	root := t.TempDir()
+	destination := filepath.Join(root, "契約書")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "new.txt")
+	if err := os.WriteFile(source, []byte("契約書"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := storage.Open(ctx, filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	extractor := blockingExtractor{started: make(chan struct{}), release: make(chan struct{})}
+	service, err := app.NewService(db, extractor, scoring.KeywordScorer{}, filesystem.Local{}, domain.DefaultClassificationPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.RegisterFolder(ctx, destination, "契約書", "契約書", ""); err != nil {
+		t.Fatal(err)
+	}
+	ingestDone := make(chan error, 1)
+	go func() { _, err := service.Ingest(ctx, source); ingestDone <- err }()
+	select {
+	case <-extractor.started:
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	resetDone := make(chan struct {
+		result domain.ResetResult
+		err    error
+	}, 1)
+	go func() {
+		result, err := service.ResetData(ctx, true, true)
+		resetDone <- struct {
+			result domain.ResetResult
+			err    error
+		}{result, err}
+	}()
+	select {
+	case <-resetDone:
+		t.Fatal("reset ran while ingestion was still active")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(extractor.release)
+	if err := <-ingestDone; err != nil {
+		t.Fatal(err)
+	}
+	reset := <-resetDone
+	if reset.err != nil || reset.result.Files != 1 {
+		t.Fatalf("reset: %+v %v", reset.result, reset.err)
+	}
+	restoredPath := filepath.Join(root, "restored.db")
+	if err := storage.RestoreBackup(ctx, reset.result.BackupPath, restoredPath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := storage.Open(ctx, restoredPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if hits, err := restored.Search(ctx, "契約書", 10); err != nil || len(hits) != 1 {
+		t.Fatalf("in-flight ingestion missing from backup: %#v %v", hits, err)
 	}
 }
 
